@@ -13,8 +13,7 @@ CALIBRACION = "calibracion.npz"
 
 CAMARA = 0
 
-# Las 7 salidas REALES del modelo
-EMOCIONES_MODELO = [
+EMOCIONES = [
     "Enojado",
     "Disgusto",
     "Miedo",
@@ -24,36 +23,18 @@ EMOCIONES_MODELO = [
     "Neutral"
 ]
 
-# Emociones que mostraremos al usuario
-EMOCIONES = [
-    "Feliz",
-    "Triste",
-    "Sorpresa",
-    "Neutral"
-]
-
-# Índices correspondientes a las emociones anteriores
-INDICES = {
-    "Feliz": 3,
-    "Triste": 4,
-    "Sorpresa": 5,
-    "Neutral": 6
-}
-
 # ============================================================
 # COMPROBAR ARCHIVOS
 # ============================================================
 
 if not os.path.exists(MODELO):
-    print("ERROR: No se encuentra:")
-    print(MODELO)
-    input("Presiona ENTER para salir...")
+    print("ERROR: No se encuentra emotion_classifier.onnx")
+    input("ENTER para salir...")
     exit()
 
 if not os.path.exists(CALIBRACION):
-    print("ERROR: No se encuentra:")
-    print(CALIBRACION)
-    input("Presiona ENTER para salir...")
+    print("ERROR: No se encuentra calibracion.npz")
+    input("ENTER para salir...")
     exit()
 
 # ============================================================
@@ -66,12 +47,12 @@ promedio = calibracion["promedio"]
 desviacion = calibracion["desviacion"]
 
 print("=" * 60)
-print("CALIBRACIÓN CARGADA")
+print("CALIBRACIÓN")
 print("=" * 60)
 
 for i in range(7):
     print(
-        f"{i} - {EMOCIONES_MODELO[i]:10s}: "
+        f"{i} - {EMOCIONES[i]:10s} "
         f"promedio={promedio[i]:+.6f} "
         f"desv={desviacion[i]:.6f}"
     )
@@ -79,10 +60,8 @@ for i in range(7):
 print("=" * 60)
 
 # ============================================================
-# CARGAR ONNX
+# CARGAR MODELO ONNX
 # ============================================================
-
-print("\nCargando modelo...")
 
 sesion = ort.InferenceSession(
     MODELO,
@@ -91,7 +70,7 @@ sesion = ort.InferenceSession(
 
 entrada = sesion.get_inputs()[0].name
 
-print("Modelo cargado correctamente.")
+print("Modelo:", MODELO)
 print("Entrada:", entrada)
 print("Forma:", sesion.get_inputs()[0].shape)
 
@@ -108,10 +87,8 @@ face_cascade = cv2.CascadeClassifier(cascade_path)
 
 if face_cascade.empty():
     print("ERROR: No se pudo cargar Haar Cascade.")
-    input("Presiona ENTER para salir...")
+    input("ENTER para salir...")
     exit()
-
-print("Haar Cascade cargado correctamente.")
 
 # ============================================================
 # CÁMARA
@@ -121,10 +98,9 @@ cap = cv2.VideoCapture(CAMARA)
 
 if not cap.isOpened():
     print("ERROR: No se pudo abrir la cámara.")
-    input("Presiona ENTER para salir...")
+    input("ENTER para salir...")
     exit()
 
-# Intentar mantener una resolución razonable
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
@@ -132,14 +108,21 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 # VARIABLES
 # ============================================================
 
-probabilidades_actuales = np.zeros(4, dtype=np.float32)
+# Probabilidades iniciales
+probabilidades = np.ones(7, dtype=np.float32) / 7.0
 
 # Suavizado temporal
-probabilidades_suavizadas = np.ones(4, dtype=np.float32) / 4
+probabilidades_suavizadas = probabilidades.copy()
 
-ALPHA = 0.15
+# Mientras más pequeño, más suave
+ALPHA = 0.12
 
+# Emoción mostrada
 emocion_actual = "Neutral"
+
+# Últimos scores
+scores_originales = np.zeros(7, dtype=np.float32)
+scores_corregidos = np.zeros(7, dtype=np.float32)
 
 # Diagnóstico
 mostrar_diagnostico = False
@@ -149,72 +132,29 @@ fps = 0
 fps_contador = 0
 fps_tiempo = time.time()
 
-# Procesar modelo cada ciertos frames
+# Procesar ONNX cada 2 frames para conservar FPS
 frame_contador = 0
-
 PROCESAR_CADA = 2
-
-# Último rostro detectado
-ultimo_rostro = None
 
 # ============================================================
 # FUNCIONES
 # ============================================================
 
-def softmax(x):
-    """
-    Convierte scores del modelo en probabilidades.
-    """
-    x = x - np.max(x)
+def softmax(scores):
 
-    exp_x = np.exp(x)
+    scores = scores - np.max(scores)
 
-    return exp_x / np.sum(exp_x)
+    exp_scores = np.exp(scores)
+
+    return exp_scores / np.sum(exp_scores)
 
 
 def corregir_scores(scores):
-    """
-    Corrige el sesgo obtenido durante la calibración.
 
-    Restamos el promedio de cada salida para que una emoción
-    que tenga un sesgo permanente no domine el resultado.
-    """
+    # Eliminamos el sesgo medido durante la calibración
+    corregidos = scores - promedio
 
-    scores_corregidos = scores - promedio
-
-    return scores_corregidos
-
-
-def obtener_probabilidades(scores):
-    """
-    Aplica calibración + softmax.
-    """
-
-    scores_corregidos = corregir_scores(scores)
-
-    probabilidades_7 = softmax(scores_corregidos)
-
-    # Nos quedamos con:
-    # Feliz, Triste, Sorpresa y Neutral
-
-    seleccionadas = np.array([
-        probabilidades_7[INDICES["Feliz"]],
-        probabilidades_7[INDICES["Triste"]],
-        probabilidades_7[INDICES["Sorpresa"]],
-        probabilidades_7[INDICES["Neutral"]]
-    ], dtype=np.float32)
-
-    # Renormalizar las 4 emociones mostradas
-    suma = np.sum(seleccionadas)
-
-    if suma > 0:
-        seleccionadas /= suma
-
-    return (
-        scores_corregidos,
-        probabilidades_7,
-        seleccionadas
-    )
+    return corregidos
 
 
 def dibujar_barra(
@@ -223,8 +163,8 @@ def dibujar_barra(
     probabilidad,
     x,
     y,
-    ancho=220,
-    alto=22
+    ancho=250,
+    alto=24
 ):
 
     # Texto
@@ -235,7 +175,7 @@ def dibujar_barra(
         texto,
         (x, y - 5),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
+        0.52,
         (255, 255, 255),
         1,
         cv2.LINE_AA
@@ -246,12 +186,12 @@ def dibujar_barra(
         frame,
         (x, y),
         (x + ancho, y + alto),
-        (60, 60, 60),
+        (55, 55, 55),
         -1
     )
 
     # Barra
-    longitud = int(ancho * probabilidad)
+    longitud = int(ancho * float(probabilidad))
 
     cv2.rectangle(
         frame,
@@ -271,15 +211,14 @@ def dibujar_barra(
     )
 
 
-def dibujar_diagnostico(frame, scores, probabilidades):
+def dibujar_diagnostico(frame):
 
     alto, ancho = frame.shape[:2]
 
-    # Panel
-    x1 = 15
-    y1 = 15
-    x2 = min(ancho - 15, 420)
-    y2 = min(alto - 15, 400)
+    x1 = 300
+    y1 = 60
+    x2 = min(ancho - 10, 630)
+    y2 = min(alto - 10, 455)
 
     overlay = frame.copy()
 
@@ -303,88 +242,85 @@ def dibujar_diagnostico(frame, scores, probabilidades):
     cv2.putText(
         frame,
         "DIAGNOSTICO",
-        (30, 45),
+        (x1 + 15, y1 + 28),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.75,
+        0.65,
         (0, 255, 255),
         2,
         cv2.LINE_AA
     )
 
+    # Scores
+    y = y1 + 55
+
     cv2.putText(
         frame,
         "Scores corregidos:",
-        (30, 75),
+        (x1 + 15, y),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
+        0.5,
         (255, 255, 255),
         1,
         cv2.LINE_AA
     )
 
-    y = 100
+    y += 23
 
     for i in range(7):
 
         texto = (
-            f"{i} - {EMOCIONES_MODELO[i]:10s}: "
-            f"{scores[i]:+.4f}"
+            f"{i} - {EMOCIONES[i]:10s}: "
+            f"{scores_corregidos[i]:+.4f}"
         )
 
         cv2.putText(
             frame,
             texto,
-            (30, y),
+            (x1 + 15, y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
+            0.43,
             (220, 220, 220),
             1,
             cv2.LINE_AA
         )
 
-        y += 23
+        y += 21
 
-    y += 8
+    y += 5
 
     cv2.putText(
         frame,
         "Probabilidades:",
-        (30, y),
+        (x1 + 15, y),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
+        0.5,
         (255, 255, 255),
         1,
         cv2.LINE_AA
     )
 
-    y += 25
+    y += 22
 
-    for i in range(4):
-
-        nombre = EMOCIONES[i]
+    for i in range(7):
 
         texto = (
-            f"{nombre:10s}: "
-            f"{probabilidades[i] * 100:.2f}%"
+            f"{EMOCIONES[i]:10s}: "
+            f"{probabilidades_suavizadas[i] * 100:5.2f}%"
         )
 
         cv2.putText(
             frame,
             texto,
-            (30, y),
+            (x1 + 15, y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
+            0.42,
             (0, 255, 0),
             1,
             cv2.LINE_AA
         )
 
-        y += 22
+        y += 20
 
-
-# ============================================================
-# BOTÓN DIAGNÓSTICO
-# ============================================================
 
 def mouse_callback(event, x, y, flags, param):
 
@@ -392,14 +328,14 @@ def mouse_callback(event, x, y, flags, param):
 
     if event == cv2.EVENT_LBUTTONDOWN:
 
-        # Botón ubicado arriba a la derecha
-        if 470 <= x <= 625 and 15 <= y <= 55:
+        # Botón diagnóstico
+        if 470 <= x <= 625 and 10 <= y <= 50:
 
             mostrar_diagnostico = not mostrar_diagnostico
 
 
 # ============================================================
-# CREAR VENTANA
+# VENTANA
 # ============================================================
 
 cv2.namedWindow("Detector de emociones")
@@ -410,38 +346,43 @@ cv2.setMouseCallback(
 )
 
 # ============================================================
-# BUCLE PRINCIPAL
+# PROGRAMA PRINCIPAL
 # ============================================================
 
 print()
 print("=" * 60)
-print("DETECTOR DE EMOCIONES")
+print("DETECTOR DE 7 EMOCIONES CALIBRADO")
 print("=" * 60)
-print("Feliz / Triste / Sorpresa / Neutral")
 print()
-print("Haz clic en DIAGNOSTICO para ver los scores.")
-print("Presiona ESC para salir.")
+print("Emociones:")
+print("  0 - Enojado")
+print("  1 - Disgusto")
+print("  2 - Miedo")
+print("  3 - Feliz")
+print("  4 - Triste")
+print("  5 - Sorpresa")
+print("  6 - Neutral")
+print()
+print("ESC = salir")
+print("Botón DIAGNOSTICO = ver información")
 print("=" * 60)
-
-ultimo_scores = np.zeros(7, dtype=np.float32)
-ultimo_probabilidades_7 = np.zeros(7, dtype=np.float32)
 
 while True:
 
     ret, frame = cap.read()
 
     if not ret:
-        print("No se pudo leer la cámara.")
+        print("ERROR leyendo cámara.")
         break
+
+    # Espejo
+    frame = cv2.flip(frame, 1)
 
     frame_contador += 1
 
-    # Voltear como espejo
-    frame = cv2.flip(frame, 1)
-
-    # --------------------------------------------------------
-    # DETECCIÓN FACIAL
-    # --------------------------------------------------------
+    # ========================================================
+    # DETECCIÓN DE ROSTRO
+    # ========================================================
 
     gray = cv2.cvtColor(
         frame,
@@ -458,18 +399,14 @@ while True:
     if len(rostros) > 0:
 
         # Rostro más grande
-        rostro = max(
+        x, y, w, h = max(
             rostros,
             key=lambda r: r[2] * r[3]
         )
 
-        x, y, w, h = rostro
-
-        ultimo_rostro = rostro
-
-        # ----------------------------------------------------
-        # PROCESAR ONNX
-        # ----------------------------------------------------
+        # ====================================================
+        # INFERENCIA
+        # ====================================================
 
         if frame_contador % PROCESAR_CADA == 0:
 
@@ -477,20 +414,17 @@ while True:
 
             if cara.size > 0:
 
-                # Redimensionar
                 cara = cv2.resize(
                     cara,
                     (224, 224),
                     interpolation=cv2.INTER_AREA
                 )
 
-                # BGR -> RGB
                 cara = cv2.cvtColor(
                     cara,
                     cv2.COLOR_BGR2RGB
                 )
 
-                # Normalización
                 cara = cara.astype(
                     np.float32
                 ) / 255.0
@@ -507,56 +441,68 @@ while True:
                     axis=0
                 )
 
-                # ------------------------------------------------
-                # INFERENCIA
-                # ------------------------------------------------
+                # =================================================
+                # MODELO
+                # =================================================
 
                 salida = sesion.run(
                     None,
                     {entrada: cara}
                 )[0][0]
 
-                ultimo_scores = salida.copy()
+                scores_originales = salida.copy()
 
-                # ------------------------------------------------
+                # =================================================
                 # CALIBRACIÓN
-                # ------------------------------------------------
+                # =================================================
 
-                (
-                    scores_corregidos,
-                    probabilidades_7,
-                    probabilidades_4
-                ) = obtener_probabilidades(salida)
+                scores_corregidos = corregir_scores(
+                    scores_originales
+                )
 
-                ultimo_scores = scores_corregidos
-                ultimo_probabilidades_7 = probabilidades_7
+                # =================================================
+                # PROBABILIDADES
+                # =================================================
 
-                probabilidades_actuales = probabilidades_4
+                probabilidades = softmax(
+                    scores_corregidos
+                )
 
-                # ------------------------------------------------
+                # =================================================
                 # SUAVIZADO
-                # ------------------------------------------------
+                # =================================================
 
                 probabilidades_suavizadas = (
-                    ALPHA * probabilidades_actuales
+                    ALPHA * probabilidades
                     +
-                    (1 - ALPHA) *
+                    (1.0 - ALPHA) *
                     probabilidades_suavizadas
                 )
 
-                # ------------------------------------------------
-                # EMOCIÓN FINAL
-                # ------------------------------------------------
-
-                indice = np.argmax(
+                # Normalizar
+                suma = np.sum(
                     probabilidades_suavizadas
+                )
+
+                if suma > 0:
+
+                    probabilidades_suavizadas /= suma
+
+                # =================================================
+                # EMOCIÓN
+                # =================================================
+
+                indice = int(
+                    np.argmax(
+                        probabilidades_suavizadas
+                    )
                 )
 
                 emocion_actual = EMOCIONES[indice]
 
-        # ----------------------------------------------------
-        # RECTÁNGULO DEL ROSTRO
-        # ----------------------------------------------------
+        # ========================================================
+        # RECTÁNGULO
+        # ========================================================
 
         cv2.rectangle(
             frame,
@@ -566,43 +512,41 @@ while True:
             2
         )
 
-    else:
-
-        ultimo_rostro = None
-
     # ========================================================
-    # TEXTO EMOCIÓN PRINCIPAL
+    # EMOCIÓN PRINCIPAL
     # ========================================================
 
     cv2.putText(
         frame,
         emocion_actual,
-        (20, 45),
+        (20, 42),
         cv2.FONT_HERSHEY_SIMPLEX,
-        1.1,
+        1.0,
         (0, 255, 255),
         3,
         cv2.LINE_AA
     )
 
     # ========================================================
-    # BARRAS
+    # BARRAS DE LAS 7 EMOCIONES
     # ========================================================
 
     x_barra = 20
-    y_barra = 75
+    y_barra = 70
 
-    for i in range(4):
+    for i in range(7):
 
         dibujar_barra(
             frame,
             EMOCIONES[i],
             probabilidades_suavizadas[i],
             x_barra,
-            y_barra
+            y_barra,
+            ancho=250,
+            alto=21
         )
 
-        y_barra += 48
+        y_barra += 45
 
     # ========================================================
     # BOTÓN DIAGNÓSTICO
@@ -610,16 +554,16 @@ while True:
 
     cv2.rectangle(
         frame,
-        (470, 15),
-        (625, 55),
-        (80, 80, 80),
+        (470, 10),
+        (625, 50),
+        (70, 70, 70),
         -1
     )
 
     cv2.rectangle(
         frame,
-        (470, 15),
-        (625, 55),
+        (470, 10),
+        (625, 50),
         (255, 255, 255),
         1
     )
@@ -627,9 +571,9 @@ while True:
     cv2.putText(
         frame,
         "DIAGNOSTICO",
-        (480, 42),
+        (482, 37),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
+        0.48,
         (255, 255, 255),
         1,
         cv2.LINE_AA
@@ -641,23 +585,23 @@ while True:
 
     fps_contador += 1
 
-    tiempo_actual = time.time()
+    ahora = time.time()
 
-    if tiempo_actual - fps_tiempo >= 1.0:
+    if ahora - fps_tiempo >= 1.0:
 
         fps = fps_contador / (
-            tiempo_actual - fps_tiempo
+            ahora - fps_tiempo
         )
 
         fps_contador = 0
-        fps_tiempo = tiempo_actual
+        fps_tiempo = ahora
 
     cv2.putText(
         frame,
         f"FPS: {fps:.1f}",
-        (500, 85),
+        (500, 75),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
+        0.5,
         (255, 255, 255),
         1,
         cv2.LINE_AA
@@ -669,11 +613,7 @@ while True:
 
     if mostrar_diagnostico:
 
-        dibujar_diagnostico(
-            frame,
-            ultimo_scores,
-            ultimo_probabilidades_7
-        )
+        dibujar_diagnostico(frame)
 
     # ========================================================
     # MOSTRAR
@@ -686,7 +626,6 @@ while True:
 
     tecla = cv2.waitKey(1) & 0xFF
 
-    # ESC
     if tecla == 27:
         break
 

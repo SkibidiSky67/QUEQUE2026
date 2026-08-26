@@ -3,6 +3,7 @@ import numpy as np
 import onnxruntime as ort
 import time
 import os
+import socket
 
 # ============================================================
 # CONFIGURACIÓN
@@ -12,6 +13,22 @@ MODELO = "emotion_classifier.onnx"
 CALIBRACION = "calibracion.npz"
 
 CAMARA = 0
+
+# ============================================================
+# BLENDER
+# ============================================================
+
+BLENDER_HOST = "127.0.0.1"
+BLENDER_PORT = 5000
+
+FRASES = {
+    "Feliz": "¡Me alegra verte asi! Sigue disfrutando este momento.",
+    "Triste": "Esta bien sentirse triste. Date un momento y recuerda que no estas solo.",
+    "Sorpresa": "¡Vaya! Parece que algo te sorprendio.",
+    "Neutral": "Todo tranquilo. Respira y sigue adelante."
+}
+
+ultima_emocion_blender = None
 
 # Las 7 salidas REALES del modelo
 EMOCIONES_MODELO = [
@@ -215,6 +232,27 @@ def obtener_probabilidades(scores):
         probabilidades_7,
         seleccionadas
     )
+
+
+def enviar_a_blender(emocion):
+    global ultima_emocion_blender
+
+    emocion_blender = emocion.lower().strip()
+
+    if emocion_blender == ultima_emocion_blender:
+        return
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as cliente:
+            cliente.settimeout(1.0)
+            cliente.connect((BLENDER_HOST, BLENDER_PORT))
+            cliente.sendall(emocion_blender.encode("utf-8"))
+
+        ultima_emocion_blender = emocion_blender
+        print("BLENDER <-", emocion.upper())
+
+    except Exception as e:
+        print("BLENDER NO DISPONIBLE:", e)
 
 
 def dibujar_barra(
@@ -552,7 +590,11 @@ while True:
                     probabilidades_suavizadas
                 )
 
-                emocion_actual = EMOCIONES[indice]
+                nueva_emocion = EMOCIONES[indice]
+
+                if nueva_emocion != emocion_actual:
+                    emocion_actual = nueva_emocion
+                    enviar_a_blender(emocion_actual)
 
         # ----------------------------------------------------
         # RECTÁNGULO DEL ROSTRO
@@ -582,6 +624,23 @@ while True:
         1.1,
         (0, 255, 255),
         3,
+        cv2.LINE_AA
+    )
+
+    # ========================================================
+    # FRASE DE ANIMO
+    # ========================================================
+
+    frase_actual = FRASES.get(emocion_actual, "")
+
+    cv2.putText(
+        frame,
+        frase_actual,
+        (20, 330),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (255, 255, 255),
+        1,
         cv2.LINE_AA
     )
 

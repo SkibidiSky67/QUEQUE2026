@@ -1,0 +1,179 @@
+import cv2
+import numpy as np
+import onnxruntime as ort
+import os
+
+MODELO = "emotion_classifier.onnx"
+
+# Las 7 salidas originales del modelo
+EMOCIONES = [
+    "Enojado",
+    "Disgusto",
+    "Miedo",
+    "Feliz",
+    "Triste",
+    "Sorpresa",
+    "Neutral"
+]
+
+# Cargar modelo
+sesion = ort.InferenceSession(
+    MODELO,
+    providers=["CPUExecutionProvider"]
+)
+
+entrada = sesion.get_inputs()[0].name
+
+print("=" * 60)
+print("CALIBRACION AUTOMATICA")
+print("=" * 60)
+print()
+print("El sistema analizará tu rostro durante unos segundos.")
+print("IMPORTANTE:")
+print("- Mira a la cámara.")
+print("- Mantén el rostro dentro del cuadro.")
+print("- Haz expresiones naturales.")
+print()
+print("Presiona ENTER para comenzar.")
+input()
+
+# Haar Cascade
+cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+face_cascade = cv2.CascadeClassifier(cascade_path)
+
+cap = cv2.VideoCapture(0)
+
+if not cap.isOpened():
+    print("ERROR: No se pudo abrir la cámara.")
+    exit()
+
+# Acumulamos las salidas del modelo
+scores_acumulados = []
+contador = 0
+
+print()
+print("CALIBRANDO...")
+print("Mantén una expresión NEUTRAL durante unos segundos.")
+print("Presiona ESC para cancelar.")
+print()
+
+while contador < 150:
+
+    ret, frame = cap.read()
+
+    if not ret:
+        continue
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    rostros = face_cascade.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=5,
+        minSize=(80, 80)
+    )
+
+    if len(rostros) > 0:
+
+        # Tomamos el rostro más grande
+        rostro = max(
+            rostros,
+            key=lambda r: r[2] * r[3]
+        )
+
+        x, y, w, h = rostro
+
+        cara = frame[y:y+h, x:x+w]
+
+        if cara.size > 0:
+
+            # Preprocesamiento
+            cara = cv2.resize(cara, (224, 224))
+            cara = cv2.cvtColor(cara, cv2.COLOR_BGR2RGB)
+
+            cara = cara.astype(np.float32) / 255.0
+
+            # HWC -> CHW
+            cara = np.transpose(cara, (2, 0, 1))
+
+            # Batch
+            cara = np.expand_dims(cara, axis=0)
+
+            # Inferencia
+            salida = sesion.run(None, {entrada: cara})[0][0]
+
+            scores_acumulados.append(salida)
+
+            contador += 1
+
+            # Barra de progreso
+            progreso = int((contador / 150) * 30)
+
+            print(
+                "\r[" +
+                "#" * progreso +
+                "-" * (30 - progreso) +
+                f"] {contador}/150",
+                end=""
+            )
+
+            cv2.rectangle(
+                frame,
+                (x, y),
+                (x+w, y+h),
+                (0, 255, 0),
+                2
+            )
+
+    cv2.imshow("Calibracion", frame)
+
+    if cv2.waitKey(1) & 0xFF == 27:
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+
+if len(scores_acumulados) < 20:
+    print("\n\nNo se obtuvieron suficientes muestras.")
+    exit()
+
+# Convertimos a numpy
+scores = np.array(scores_acumulados)
+
+# Promedio de las salidas
+promedio = np.mean(scores, axis=0)
+
+# Desviación estándar
+desviacion = np.std(scores, axis=0)
+
+print("\n")
+print("=" * 60)
+print("RESULTADO DE LA CALIBRACION")
+print("=" * 60)
+
+for i in range(7):
+    print(
+        f"{i} - {EMOCIONES[i]:10s}: "
+        f"promedio={promedio[i]:+.6f}   "
+        f"desv={desviacion[i]:.6f}"
+    )
+
+print("=" * 60)
+
+# Guardar calibración
+np.savez(
+    "calibracion.npz",
+    promedio=promedio,
+    desviacion=desviacion
+)
+
+print()
+print("CALIBRACION GUARDADA CORRECTAMENTE.")
+print()
+print("Archivo creado:")
+print("calibracion.npz")
+print()
+print("Ahora podemos usar estos valores para")
+print("corregir las probabilidades en el programa principal.")
+print()
+input("Presiona ENTER para salir...")
